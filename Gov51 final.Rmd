@@ -1,0 +1,306 @@
+---
+title: "Gov51 Final Project"
+author: "Andrea Moreno"
+date: "2026-05-01"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,      # hides code in final PDF
+  message = FALSE,   # hides package loading messages
+  warning = FALSE    # hides warnings
+)
+```
+
+```{r load-gss}
+library(foreign)
+
+read.dct <- function(dct, labels.included = "yes") {
+    temp <- readLines(dct)
+    temp <- temp[grepl("_column", temp)]
+    switch(labels.included,
+           yes = {
+               pattern <- "_column\\(([0-9]+)\\)\\s+([a-z0-9]+)\\s+(.*)\\s+%([0-9]+)[a-z]\\s+(.*)"
+               classes <- c("numeric", "character", "character", "numeric", "character")
+               N <- 5
+               NAMES <- c("StartPos", "Str", "ColName", "ColWidth", "ColLabel")
+           },
+           no = {
+               pattern <- "_column\\(([0-9]+)\\)\\s+([a-z0-9]+)\\s+(.*)\\s+%([0-9]+).*"
+               classes <- c("numeric", "character", "character", "numeric")
+               N <- 4
+               NAMES <- c("StartPos", "Str", "ColName", "ColWidth")
+           })
+    temp_metadata <- setNames(lapply(1:N, function(x) {
+        out <- gsub(pattern, paste("\\", x, sep = ""), temp)
+        out <- gsub("^\\s+|\\s+$", "", out)
+        out <- gsub('\"', "", out, fixed = TRUE)
+        class(out) <- classes[x]; out }), NAMES)
+    temp_metadata[["ColName"]] <- make.names(gsub("\\s", "", temp_metadata[["ColName"]]))
+    temp_metadata
+}
+
+read.dat <- function(dat, metadata_var, labels.included = "yes") {
+    read.table(dat, col.names = metadata_var[["ColName"]])
+}
+
+GSS_metadata <- read.dct("data/GSS.dct")
+GSS_ascii <- read.dat("data/GSS.dat", GSS_metadata)
+attr(GSS_ascii, "col.label") <- GSS_metadata[["ColLabel"]]
+gss <- GSS_ascii |> janitor::clean_names()
+```
+
+```{r load-packages}
+library(tidyverse)
+library(janitor)
+library(scales)
+library(gt)
+
+```
+
+```{r load-ces}
+ces <- read.csv("data/CCES22_Common_OUTPUT_vv_topost.csv") |>
+  clean_names()
+```
+
+```{r check-data}
+dim(gss)
+dim(ces)
+table(gss$year)
+```
+
+```{r}
+gss <- gss |>
+  mutate(
+    ab_support = case_when(
+      abany == 1 ~ 1,
+      abany == 2 ~ 0,
+      abany < 0  ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    post_dobbs = if_else(year == 2022, 1, 0),
+    gender = case_when(
+      sex == 1 ~ "Men",
+      sex == 2 ~ "Women",
+      TRUE ~ NA_character_
+    ),
+    party = case_when(
+      partyid %in% 0:2 ~ "Democrat",
+      partyid == 3 ~ "Independent",
+      partyid %in% 4:6 ~ "Republican",
+      TRUE ~ NA_character_
+    ),
+    religiosity = case_when(
+      attend <= 2 ~ "Low",
+      attend <= 5 ~ "Moderate",
+      attend >= 6 ~ "High",
+      TRUE ~ NA_character_
+    )
+  )
+
+table(gss$year, gss$ab_support, useNA = "always")
+```
+
+```{r clean-ces}
+ces <- ces |>
+  mutate(
+    # Main outcome: cc22_332a = abortion access, 1=support, 2=oppose
+    ab_support = case_when(
+      cc22_332a == 1 ~ 1,
+      cc22_332a == 2 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    
+    # Gender (keeping Man/Woman only for comparability with GSS)
+    gender = case_when(
+      gender4 == 1 ~ "Men",
+      gender4 == 2 ~ "Women",
+      TRUE ~ NA_character_
+    ),
+    
+    # Party: pid3 is 1=Dem, 2=Rep, 3=Ind, 4=Other, 5=Not sure
+    party = case_when(
+      pid3 == 1 ~ "Democrat",
+      pid3 == 2 ~ "Republican",
+      pid3 == 3 ~ "Independent",
+      TRUE ~ NA_character_
+    ),
+    
+    # Religiosity: pew_religimp 1=Very important, 2=Somewhat, 
+    #              3=Not too important, 4=Not at all important
+    religiosity = case_when(
+      pew_religimp == 1 ~ "High",
+      pew_religimp == 2 ~ "Moderate",
+      pew_religimp %in% c(3, 4) ~ "Low",
+      TRUE ~ NA_character_
+    )
+  )
+
+table(ces$ab_support, useNA = "always")
+```
+
+```{r ces-subgroup}
+# CES overall (this is all post-Dobbs since survey was Oct-Nov 2022)
+cat("CES 2022 (post-Dobbs) overall support:", 
+    round(mean(ces$ab_support, na.rm = TRUE) * 100, 1), "%\n")
+
+# CES subgroup breakdown
+ces_gender <- ces |>
+  filter(!is.na(ab_support), !is.na(gender)) |>
+  group_by(gender) |>
+  summarise(mean_support = mean(ab_support),
+            n = n(), .groups = "drop")
+
+ces_party <- ces |>
+  filter(!is.na(ab_support), !is.na(party)) |>
+  group_by(party) |>
+  summarise(mean_support = mean(ab_support),
+            n = n(), .groups = "drop")
+
+ces_relig <- ces |>
+  filter(!is.na(ab_support), !is.na(religiosity)) |>
+  group_by(religiosity) |>
+  summarise(mean_support = mean(ab_support),
+            n = n(), .groups = "drop")
+
+print(ces_gender)
+print(ces_party)
+print(ces_relig)
+```
+
+```{r overall-comparison}
+# Mean support by year
+overall <- gss |>
+  filter(!is.na(ab_support)) |>
+  group_by(year) |>
+  summarise(
+    mean_support = mean(ab_support),
+    n = n(),
+    se = sd(ab_support) / sqrt(n)
+  )
+
+print(overall)
+
+# is the difference statistically significant?
+t.test(ab_support ~ post_dobbs, data = gss)
+```
+
+```{r subgroup-analysis}
+subgroup_comparison <- function(data, group_var) {
+  data |>
+    filter(!is.na(ab_support), !is.na(.data[[group_var]])) |>
+    group_by(year, .data[[group_var]]) |>
+    summarise(
+      mean_support = mean(ab_support),
+      n = n(),
+      se = sd(ab_support) / sqrt(n),
+      .groups = "drop"
+    ) |>
+    pivot_wider(
+      names_from = year,
+      values_from = c(mean_support, n, se),
+      names_sep = "_"
+    ) |>
+    mutate(difference = mean_support_2022 - mean_support_2021)
+}
+
+gender_table <- subgroup_comparison(gss, "gender")
+party_table <- subgroup_comparison(gss, "party")
+relig_table <- subgroup_comparison(gss, "religiosity")
+
+print(gender_table)
+print(party_table)
+print(relig_table)
+```
+
+```{r figures, fig.width=10, fig.height=5}
+# Figure 1: Overall before/after
+overall |>
+  mutate(year = factor(year)) |>
+  ggplot(aes(x = year, y = mean_support, fill = year)) +
+  geom_col(width = 0.4) +
+  geom_errorbar(aes(ymin = mean_support - 1.96*se,
+                    ymax = mean_support + 1.96*se),
+                width = 0.1) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0.5, 0.65),
+                     oob = scales::squish) +
+  scale_fill_manual(values = c("2021" = "#b8d4e8", "2022" = "#2166ac")) +
+  labs(title = "Support for Abortion Access Before and After Dobbs",
+       subtitle = "GSS 2021 vs. 2022",
+       x = "Year", y = "Share Supporting Access",
+       caption = "Note: Error bars = 95% CI. p = 0.21.") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Figure 2: Subgroup shifts - one panel per category
+subgroup_long <- bind_rows(
+  gss |> filter(!is.na(ab_support), !is.na(gender)) |>
+    mutate(group = gender, category = "Gender"),
+  gss |> filter(!is.na(ab_support), !is.na(party)) |>
+    mutate(group = party, category = "Party"),
+  gss |> filter(!is.na(ab_support), !is.na(religiosity)) |>
+    mutate(group = religiosity, category = "Religiosity")
+) |>
+  group_by(category, group, year) |>
+  summarise(mean_support = mean(ab_support), .groups = "drop")
+
+ggplot(subgroup_long, aes(x = factor(year), y = mean_support,
+           color = group, group = group)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  geom_text(data = subgroup_long |> filter(year == 2022),
+            aes(label = group),
+            hjust = -0.15, size = 3) +
+  facet_wrap(~category) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0.25, 0.95)) +
+  scale_x_discrete(expand = expansion(mult = c(0.05, 0.5))) +
+  labs(title = "Abortion Support by Subgroup Before and After Dobbs",
+       subtitle = "GSS 2021 vs. 2022",
+       x = "Year", y = "Share Supporting Access",
+       caption = "Source: General Social Survey") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+```{r ces-gss-comparison}
+comparison <- tibble(
+  Group = c("Overall", "Men", "Women", 
+            "Democrat", "Independent", "Republican",
+            "High Religiosity", "Moderate Religiosity", "Low Religiosity"),
+  GSS_2021 = c(56.4, 54.9, 58.3,
+               75.7, 44.3, 33.7,
+               29.7, 52.4, 70.2),
+  GSS_2022 = c(58.9, 57.6, 59.9,
+               81.7, 56.4, 29.6,
+               30.7, 54.0, 72.4),
+  CES_2022 = c(63.7, 58.9, 67.6,
+               86.9, 60.8, 31.7,
+               41.6, 63.7, 82.0)
+) |>
+  mutate(
+    GSS_change = GSS_2022 - GSS_2021
+  )
+
+comparison |>
+  gt() |>
+  cols_label(
+    Group = "Group",
+    GSS_2021 = "GSS 2021 (pre)",
+    GSS_2022 = "GSS 2022 (post)",
+    GSS_change = "GSS Change",
+    CES_2022 = "CES 2022 (post)"
+  ) |>
+  fmt_number(columns = c(GSS_2021, GSS_2022, CES_2022, GSS_change),
+             decimals = 1,
+             suffix = "%") |>
+  tab_header(
+    title = "Abortion Support Before and After Dobbs",
+    subtitle = "GSS 2021 vs. 2022 and CES 2022"
+  ) |>
+  tab_row_group(label = "Religiosity", rows = 7:9) |>
+  tab_row_group(label = "Party", rows = 4:6) |>
+  tab_row_group(label = "Gender", rows = 2:3) |>
+  tab_row_group(label = "Overall", rows = 1)
+```
